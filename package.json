@@ -1,0 +1,23 @@
+{
+  "name": "simple-plan-agent",
+  "version": "1.0.0",
+  "private": true,
+  "main": "./out/main/index.js",
+  "scripts": {
+    "dev": "electron-vite dev",
+    "build": "electron-vite build",
+    "preview": "electron-vite preview",
+    "typecheck": "vue-tsc --noEmit -p tsconfig.web.json && tsc --noEmit -p tsconfig.node.json"
+  },
+  "dependencies": {
+    "electron": "^31.7.7",
+    "vue": "^3.5.18"
+  },
+  "devDependencies": {
+    "@types/node": "^22.17.0",
+    "@vitejs/plugin-vue": "^5.2.4",
+    "electron-vite": "^2.3.0",
+    "typescript": "^5.9.2",
+    "vue-tsc": "^3.0.5"
+  }
+}
