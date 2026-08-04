@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
+import { API_BASE_URL } from './config'
 
 type MessageRole = 'user' | 'assistant'
 
@@ -16,14 +17,26 @@ type Conversation = {
 }
 
 type AuthUser = {
+  id: string
   username: string
+  createdAt: string
+  updatedAt: string
 }
 
-const AUTH_KEY = 'spa.auth.username'
+type AuthResponse = {
+  user: AuthUser
+  token: string
+}
+
+type SessionResponse = {
+  user: AuthUser
+}
+
+const TOKEN_KEY = 'spa.auth.token'
 const DEFAULT_GREETING = '你好，先输入一个问题开始吧。'
 
-const conversationsKey = (username: string) => `spa.conversations.${username}`
-const activeConversationKey = (username: string) => `spa.activeConversation.${username}`
+const conversationsKey = (userId: string) => `spa.conversations.${userId}`
+const activeConversationKey = (userId: string) => `spa.activeConversation.${userId}`
 const createId = () => crypto.randomUUID()
 const createAssistantMessage = (content = DEFAULT_GREETING): ChatMessage => ({
   id: createId(),
@@ -55,61 +68,151 @@ const summarizeTitle = (content: string) => {
 
 const loginName = ref('')
 const password = ref('')
-const loginError = ref('')
+const authMode = ref<'login' | 'register'>('login')
+const authError = ref('')
+const isSessionChecking = ref(true)
+const isAuthenticating = ref(false)
+const authToken = ref('')
 const authUser = ref<AuthUser | null>(null)
 const conversations = ref<Conversation[]>([])
 const activeConversationId = ref('')
 const question = ref('')
 
-const loadUserState = (username: string) => {
-  const storedConversations = readJson<unknown>(conversationsKey(username), [])
+const requestJson = async <T,>(path: string, options: { method?: string; body?: unknown; token?: string } = {}) => {
+  try {
+    const response = await fetch(`${API_BASE_URL}${path}`, {
+      method: options.method ?? 'GET',
+      headers: {
+        ...(options.body ? { 'Content-Type': 'application/json' } : {}),
+        ...(options.token ? { Authorization: `Bearer ${options.token}` } : {})
+      },
+      body: options.body ? JSON.stringify(options.body) : undefined
+    })
+
+    const payload = await response.json().catch(() => null)
+
+    if (!response.ok) {
+      throw new Error(payload?.message || '请求失败')
+    }
+
+    return payload as T
+  } catch (error) {
+    if (error instanceof TypeError) {
+      throw new Error('无法连接后台服务，请先启动 backend')
+    }
+
+    throw error
+  }
+}
+
+const loadUserState = (userId: string) => {
+  const storedConversations = readJson<unknown>(conversationsKey(userId), [])
   const loadedConversations = Array.isArray(storedConversations) ? (storedConversations as Conversation[]) : []
 
   conversations.value = loadedConversations.length > 0 ? loadedConversations : [createConversation()]
 
-  const storedActiveId = localStorage.getItem(activeConversationKey(username)) ?? ''
+  const storedActiveId = localStorage.getItem(activeConversationKey(userId)) ?? ''
   const activeExists = storedActiveId && conversations.value.some((conversation) => conversation.id === storedActiveId)
 
   activeConversationId.value = activeExists ? storedActiveId : conversations.value[0].id
+  saveUserState()
 }
 
 const saveUserState = () => {
-  const username = authUser.value?.username
+  const userId = authUser.value?.id
 
-  if (!username) {
+  if (!userId) {
     return
   }
 
-  localStorage.setItem(AUTH_KEY, username)
-  localStorage.setItem(conversationsKey(username), JSON.stringify(conversations.value))
-  localStorage.setItem(activeConversationKey(username), activeConversationId.value)
+  localStorage.setItem(conversationsKey(userId), JSON.stringify(conversations.value))
+  localStorage.setItem(activeConversationKey(userId), activeConversationId.value)
 }
 
-const handleLogin = () => {
+const clearAuthState = () => {
+  authToken.value = ''
+  authUser.value = null
+  conversations.value = []
+  activeConversationId.value = ''
+  loginName.value = ''
+  password.value = ''
+  authError.value = ''
+  question.value = ''
+}
+
+const restoreSession = async () => {
+  const storedToken = localStorage.getItem(TOKEN_KEY)
+
+  if (!storedToken) {
+    isSessionChecking.value = false
+    return
+  }
+
+  authToken.value = storedToken
+
+  try {
+    const session = await requestJson<SessionResponse>('/auth/session', {
+      token: storedToken
+    })
+
+    authUser.value = session.user
+    loadUserState(session.user.id)
+  } catch {
+    localStorage.removeItem(TOKEN_KEY)
+    clearAuthState()
+  } finally {
+    isSessionChecking.value = false
+  }
+}
+
+const submitAuth = async () => {
   const username = loginName.value.trim()
   const secret = password.value.trim()
 
   if (!username || !secret) {
-    loginError.value = '请输入用户名和密码'
+    authError.value = '请输入用户名和密码'
     return
   }
 
-  authUser.value = { username }
-  loginError.value = ''
-  loadUserState(username)
-  saveUserState()
-  password.value = ''
+  isAuthenticating.value = true
+  authError.value = ''
+
+  try {
+    const path = authMode.value === 'register' ? '/auth/register' : '/auth/login'
+    const result = await requestJson<AuthResponse>(path, {
+      method: 'POST',
+      body: {
+        username,
+        password: secret
+      }
+    })
+
+    authToken.value = result.token
+    authUser.value = result.user
+    localStorage.setItem(TOKEN_KEY, result.token)
+    loadUserState(result.user.id)
+    password.value = ''
+  } catch (error) {
+    authError.value = error instanceof Error ? error.message : '认证失败'
+  } finally {
+    isAuthenticating.value = false
+  }
 }
 
-const handleLogout = () => {
-  authUser.value = null
-  loginName.value = ''
-  password.value = ''
-  loginError.value = ''
-  question.value = ''
-  conversations.value = []
-  activeConversationId.value = ''
-  localStorage.removeItem(AUTH_KEY)
+const handleLogout = async () => {
+  const token = authToken.value
+
+  try {
+    if (token) {
+      await requestJson('/auth/logout', {
+        method: 'POST',
+        token
+      })
+    }
+  } finally {
+    localStorage.removeItem(TOKEN_KEY)
+    clearAuthState()
+  }
 }
 
 const currentConversation = computed(
@@ -160,22 +263,40 @@ const submitQuestion = () => {
   saveUserState()
 }
 
-const savedUsername = localStorage.getItem(AUTH_KEY)
-
-if (savedUsername) {
-  authUser.value = { username: savedUsername }
-  loadUserState(savedUsername)
-}
+onMounted(() => {
+  void restoreSession()
+})
 </script>
 
 <template>
-  <div v-if="!authUser" class="login-screen">
+  <div v-if="isSessionChecking" class="login-screen">
     <section class="login-card">
       <p class="eyebrow">Simple Plan Agent</p>
-      <h1>登录</h1>
-      <p class="description">本地登录，仅用于区分不同对话历史。</p>
+      <h1>正在连接后台</h1>
+      <p class="description">正在检查会话状态，请稍候。</p>
+    </section>
+  </div>
 
-      <form class="login-form" @submit.prevent="handleLogin">
+  <div v-else-if="!authUser" class="login-screen">
+    <section class="login-card">
+      <p class="eyebrow">Simple Plan Agent</p>
+      <h1>{{ authMode === 'register' ? '注册' : '登录' }}</h1>
+      <p class="description">
+        {{ authMode === 'register' ? '创建新账号并进入后台登录。' : '使用后台账号继续你的对话。' }}
+      </p>
+
+      <div class="auth-switch" role="tablist" aria-label="登录方式">
+        <button type="button" :class="{ active: authMode === 'login' }" @click="authMode = 'login'">登录</button>
+        <button
+          type="button"
+          :class="{ active: authMode === 'register' }"
+          @click="authMode = 'register'"
+        >
+          注册
+        </button>
+      </div>
+
+      <form class="login-form" @submit.prevent="submitAuth">
         <label class="field">
           <span>用户名</span>
           <input v-model="loginName" type="text" placeholder="输入用户名" autocomplete="username" />
@@ -186,9 +307,11 @@ if (savedUsername) {
           <input v-model="password" type="password" placeholder="输入密码" autocomplete="current-password" />
         </label>
 
-        <p v-if="loginError" class="error">{{ loginError }}</p>
+        <p v-if="authError" class="error">{{ authError }}</p>
 
-        <button type="submit">登录</button>
+        <button type="submit" :disabled="isAuthenticating">
+          {{ isAuthenticating ? (authMode === 'register' ? '注册中…' : '登录中…') : authMode === 'register' ? '注册' : '登录' }}
+        </button>
       </form>
     </section>
   </div>
@@ -198,7 +321,7 @@ if (savedUsername) {
       <div class="sidebar-header">
         <div class="account">
           <span class="account-name">{{ authUser.username }}</span>
-          <span class="account-note">本地登录</span>
+          <span class="account-note">后台登录</span>
         </div>
         <button class="ghost-button" type="button" @click="handleLogout">退出</button>
       </div>
